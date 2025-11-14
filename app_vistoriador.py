@@ -263,6 +263,7 @@ def cb_clear_unids():   st.session_state.unids_tmp = []               ; st.rerun
 # =========================
 st.subheader("🔎 Filtros")
 
+# Unidades
 colU1, colU2 = st.columns([4,2])
 with colU1:
     st.multiselect("Unidades", options=unidades_opts, key="unids_tmp")
@@ -271,16 +272,44 @@ with colU2:
     b1.button("Selecionar todas (Unid.)", use_container_width=True, on_click=cb_sel_all_unids)
     b2.button("Limpar (Unid.)", use_container_width=True, on_click=cb_clear_unids)
 
+# ===== NOVO BLOCO: MÊS DE REFERÊNCIA + PERÍODO (DENTRO DO MÊS) =====
 datas_validas = [d for d in df["__DATA__"] if isinstance(d, date)]
-dmin = min(datas_validas) if datas_validas else date.today()
-dmax = max(datas_validas) if datas_validas else date.today()
-st.session_state.setdefault("dt_ini", dmin)
-st.session_state.setdefault("dt_fim", dmax)
+if not datas_validas:
+    st.error("Base sem datas válidas em __DATA__.")
+    st.stop()
 
-colD1, colD2 = st.columns(2)
-with colD1: st.date_input("Data inicial", key="dt_ini", format="DD/MM/YYYY")
-with colD2: st.date_input("Data final",   key="dt_fim", format="DD/MM/YYYY")
+# Lista de meses existentes (AAAA-MM)
+ser_datas = pd.Series(datas_validas)
+ym_all = sorted(ser_datas.map(lambda d: f"{d.year}-{d.month:02d}").unique().tolist())
+label_map = {f"{m[5:]}/{m[:4]}": m for m in ym_all}
 
+sel_label = st.selectbox(
+    "Mês de referência",
+    options=list(label_map.keys()),
+    index=len(ym_all) - 1  # último mês disponível (mais recente)
+)
+ym_sel = label_map[sel_label]
+ref_year, ref_month = int(ym_sel[:4]), int(ym_sel[5:7])
+
+# Datas mín/máx dentro do mês selecionado
+datas_mes = [d for d in datas_validas if d.year == ref_year and d.month == ref_month]
+min_d = min(datas_mes)
+max_d = max(datas_mes)
+
+drange = st.date_input(
+    "Período (dentro do mês)",
+    value=(min_d, max_d),
+    min_value=min_d,
+    max_value=max_d,
+    format="DD/MM/YYYY",
+    key="dt_range"
+)
+if isinstance(drange, tuple) and len(drange) == 2:
+    start_d, end_d = drange
+else:
+    start_d, end_d = min_d, max_d
+
+# Vistoriadores
 colV1, colV2 = st.columns([4,2])
 with colV1:
     st.multiselect("Vistoriadores", options=vist_opts, key="vists_tmp")
@@ -293,10 +322,18 @@ with colV2:
 # Aplicar filtros (view é a base para TUDO, inclusive KPIs)
 # =========================
 view = df.copy()
+
 if st.session_state.unids_tmp:
     view = view[view[col_unid].isin(st.session_state.unids_tmp)]
-if st.session_state.dt_ini and st.session_state.dt_fim:
-    view = view[(view["__DATA__"] >= st.session_state.dt_ini) & (view["__DATA__"] <= st.session_state.dt_fim)]
+
+# filtra pelo mês selecionado
+view = view[view["__DATA__"].apply(
+    lambda d: isinstance(d, date) and d.year == ref_year and d.month == ref_month
+)]
+
+# filtra pelo intervalo dentro do mês
+view = view[(view["__DATA__"] >= start_d) & (view["__DATA__"] <= end_d)]
+
 if st.session_state.vists_tmp:
     view = view[view["VISTORIADOR"].isin(st.session_state.vists_tmp)]
 
@@ -317,7 +354,12 @@ cards = [
     (_nt("Revistorias"),    f"{revistorias_total:,}".replace(",", ".")),
     (_nt("% Revistorias"),  f"{pct_rev:,.1f}%".replace(",", "X").replace(".", ",").replace("X",".")),
 ]
-st.markdown('<div class="card-container">' + "".join([f"<div class=\'card\'><h4>{t}</h4><h2>{v}</h2></div>" for t, v in cards]) + "</div>", unsafe_allow_html=True)
+st.markdown(
+    '<div class="card-container">' +
+    "".join([f"<div class='card'><h4>{t}</h4><h2>{v}</h2></div>" for t, v in cards]) +
+    "</div>",
+    unsafe_allow_html=True
+)
 
 # =========================
 # Resumo por Vistoriador  (com filtro FIXO/MÓVEL apenas aqui)
@@ -340,7 +382,8 @@ def _calc_wd_passados(df_view: pd.DataFrame) -> pd.DataFrame:
     if not mask.any():
         vists = df_view["VISTORIADOR"].dropna().unique()
         return pd.DataFrame({"VISTORIADOR": vists, "DIAS_PASSADOS": np.zeros(len(vists), dtype=int)})
-    out = (df_view.loc[mask].groupby("VISTORIADOR")["__DATA__"].nunique().reset_index().rename(columns={"__DATA__":"DIAS_PASSADOS"}))
+    out = (df_view.loc[mask].groupby("VISTORIADOR")["__DATA__"].nunique()
+           .reset_index().rename(columns={"__DATA__":"DIAS_PASSADOS"}))
     out["DIAS_PASSADOS"] = out["DIAS_PASSADOS"].astype(int)
     return out
 
@@ -434,7 +477,8 @@ else:
              .reset_index())
     daily = daily[pd.notna(daily["__DATA__"])].sort_values("__DATA__")
     daily["LIQUIDO"] = daily["VISTORIAS"] - daily["REVISTORIAS"]
-    daily_melt = daily.melt(id_vars="__DATA__", value_vars=["VISTORIAS","REVISTORIAS","LIQUIDO"], var_name="Métrica", value_name="Valor")
+    daily_melt = daily.melt(id_vars="__DATA__", value_vars=["VISTORIAS","REVISTORIAS","LIQUIDO"],
+                            var_name="Métrica", value_name="Valor")
     if daily_melt.empty:
         st.caption("Sem evolução diária para exibir.")
     else:
@@ -557,7 +601,12 @@ else:
         ("Líquido", f"{liq_tot:,}".replace(",", ".")),
         ("% Ating. (sobre geral)", chip_pct(ating_g)),
     ]
-    st.markdown('<div class="card-container">' + "".join([f"<div class=\'card\'><h4>{t}</h4><h2>{v}</h2></div>" for t, v in cards_mes]) + "</div>", unsafe_allow_html=True)
+    st.markdown(
+        '<div class="card-container">' +
+        "".join([f"<div class='card'><h4>{t}</h4><h2>{v}</h2></div>" for t, v in cards_mes]) +
+        "</div>",
+        unsafe_allow_html=True
+    )
 
     def chip_pct_row(p):
         if pd.isna(p): return "—"
